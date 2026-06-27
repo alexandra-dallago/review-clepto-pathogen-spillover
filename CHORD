@@ -1,0 +1,175 @@
+# ============================================================
+#  CHORD DIAGRAMS - Specie Clepto × Generi Piante × Specie Wild
+#  3 versioni con filtri diversi
+#  Dataset: DS_C.xlsx  |  Sheet: clepto-host-flower
+# ============================================================
+
+# install.packages(c("readxl", "dplyr", "stringr", "circlize", "tidyr", "tibble"))
+
+library(readxl)
+library(dplyr)
+library(stringr)
+library(circlize)
+
+# ============================================================
+#  FUNZIONE PRINCIPALE
+# ============================================================
+
+make_chord_generi <- function(df, n_clepto, n_wild, n_genera, filename, titolo) {
+
+  cat("\n--- Generazione:", filename, "---\n")
+
+  # Filtra top specie e generi
+  top_clepto <- df %>% filter(Taxa == "Cleptoparasite") %>%
+    count(Bee_Species, sort = TRUE) %>% slice_head(n = n_clepto) %>%
+    pull(Bee_Species)
+
+  top_wild <- df %>% filter(Taxa == "Wild bee") %>%
+    count(Bee_Species, sort = TRUE) %>% slice_head(n = n_wild) %>%
+    pull(Bee_Species)
+
+  top_genera <- df %>%
+    count(Flower_Genera, sort = TRUE) %>% slice_head(n = n_genera) %>%
+    pull(Flower_Genera)
+
+  df_filt <- df %>%
+    filter(Bee_Species %in% c(top_clepto, top_wild),
+           Flower_Genera %in% top_genera)
+
+  # Suffisso per evitare duplicati (es. Bombus in entrambi i gruppi)
+  df_filt <- df_filt %>%
+    mutate(Label = ifelse(Taxa == "Cleptoparasite",
+                          paste0(Bee_Species, " (C)"),
+                          paste0(Bee_Species, " (W)")))
+
+  # Due matrici: clepto→genere e wild→genere
+  mat_c <- df_filt %>% filter(Taxa == "Cleptoparasite") %>%
+    count(Label, Flower_Genera) %>%
+    tidyr::pivot_wider(names_from = Flower_Genera, values_from = n, values_fill = 0) %>%
+    tibble::column_to_rownames("Label") %>% as.matrix()
+
+  mat_w <- df_filt %>% filter(Taxa == "Wild bee") %>%
+    count(Label, Flower_Genera) %>%
+    tidyr::pivot_wider(names_from = Flower_Genera, values_from = n, values_fill = 0) %>%
+    tibble::column_to_rownames("Label") %>% as.matrix()
+
+  # Allinea colonne (generi) tra le due matrici
+  all_genera <- union(colnames(mat_c), colnames(mat_w))
+  for (g in setdiff(all_genera, colnames(mat_c)))
+    mat_c <- cbind(mat_c, setNames(data.frame(rep(0, nrow(mat_c))), g))
+  for (g in setdiff(all_genera, colnames(mat_w)))
+    mat_w <- cbind(mat_w, setNames(data.frame(rep(0, nrow(mat_w))), g))
+  mat_c <- mat_c[, all_genera, drop = FALSE]
+  mat_w <- mat_w[, all_genera, drop = FALSE]
+
+  # Matrice combinata
+  mat_full <- rbind(mat_c, mat_w)
+
+  # Ordine settori: clepto | generi | wild
+  sector_order <- c(rownames(mat_c), all_genera, rownames(mat_w))
+
+  nc <- nrow(mat_c)
+  ng <- length(all_genera)
+  nw <- nrow(mat_w)
+  cat("  Settori:", nc, "clepto +", ng, "generi +", nw, "wild =", nc+ng+nw, "totale\n")
+
+  # Colori
+  clepto_col <- colorRampPalette(c("#D62828", "#F77F00", "#FCBF49"))(nc)
+  genera_col <- colorRampPalette(c("#A8DADC", "#52B788", "#2D6A4F"))(ng)
+  wild_col   <- colorRampPalette(c("#023E8A", "#0096C7", "#48CAE4", "#90E0EF"))(nw)
+
+  grid_colors <- setNames(
+    c(clepto_col, genera_col, wild_col),
+    c(rownames(mat_c), all_genera, rownames(mat_w))
+  )
+
+  # Gap: grande (15°) tra i 3 gruppi, piccolo (1°) dentro ogni gruppo
+  gap_vec <- c(rep(1, nc - 1), 15,
+               rep(1, ng - 1), 15,
+               rep(1, nw - 1), 15)
+
+  # Plot
+  png(filename, width = 4000, height = 4000, res = 300)
+  par(mar = c(3, 3, 5, 3))
+
+  circos.par(gap.after   = gap_vec,
+             start.degree = 90,
+             track.margin = c(0.01, 0.01),
+             points.overflow.warning = FALSE)
+
+  chordDiagram(
+    mat_full,
+    order             = sector_order,
+    grid.col          = grid_colors,
+    transparency      = 0.35,
+    annotationTrack   = "grid",
+    preAllocateTracks = list(track.height = 0.18),
+    link.sort         = TRUE,
+    link.decreasing   = TRUE,
+    directional       = 0
+  )
+
+  # Etichette settori
+  circos.trackPlotRegion(track.index = 1, bg.border = NA,
+    panel.fun = function(x, y) {
+      nm   <- get.cell.meta.data("sector.index")
+      xlim <- get.cell.meta.data("xlim")
+      ylim <- get.cell.meta.data("ylim")
+      font_style <- ifelse(grepl("\\(C\\)", nm), 2,
+                    ifelse(grepl("\\(W\\)", nm), 3, 1))
+      cex_val <- ifelse(nm %in% all_genera, 0.65, 0.60)
+      circos.text(mean(xlim), ylim[1] + 0.5, nm,
+                  facing = "clockwise", niceFacing = TRUE,
+                  adj = c(0, 0.5), cex = cex_val, font = font_style)
+    })
+
+  # Etichette gruppi
+  text(-1.15,  0.5, "CLEPTOPARASITI (C)", srt = 90,  cex = 0.9, font = 2, col = "#D62828")
+  text(-1.15, -0.5, "GENERI PIANTE",      srt = 90,  cex = 0.9, font = 2, col = "#2D6A4F")
+  text( 1.1,   0.0, "WILD BEES (W)",      srt = 270, cex = 0.9, font = 2, col = "#023E8A")
+
+  legend("bottomleft", inset = c(0.01, 0.01),
+         legend = c("Cleptoparasiti (C)", "Generi di Piante", "Wild Bees (W)"),
+         fill   = c("#D62828", "#52B788", "#023E8A"),
+         border = NA, bty = "n", cex = 0.80,
+         title = "Legenda", title.font = 2)
+
+  title(main = titolo, cex.main = 1.1, font.main = 2, line = 2)
+
+  circos.clear()
+  dev.off()
+  cat("  ✔ Salvato:", filename, "\n")
+}
+
+# ============================================================
+#  CARICAMENTO E PULIZIA DATI
+# ============================================================
+
+df <-DS_C
+df <- df %>%
+  mutate(across(c(Flower_Genera, Flower_Species, Author, Country), ~ na_if(., "0"))) %>%
+  filter(!is.na(Flower_Genera))   # rimuovi righe senza genere di pianta
+
+cat("✔ Dati caricati:", nrow(df), "righe\n")
+
+# ============================================================
+#  GENERA I 3 CHORD DIAGRAM
+# ============================================================
+
+make_chord_generi(df,
+  n_clepto = 10, n_wild = 10, n_genera = 10,
+  filename = "chord_generi_top10.png",
+  titolo   = "Top 10 Clepto × Top 10 Generi Piante × Top 10 Wild\n(interazioni più comuni)")
+
+make_chord_generi(df,
+  n_clepto = 15, n_wild = 15, n_genera = 15,
+  filename = "chord_generi_top15.png",
+  titolo   = "Top 15 Clepto × Top 15 Generi Piante × Top 15 Wild\n(visione intermedia)")
+
+make_chord_generi(df,
+  n_clepto = 20, n_wild = 20, n_genera = 15,
+  filename = "chord_generi_top20.png",
+  titolo   = "Top 20 Clepto × Top 15 Generi Piante × Top 20 Wild\n(visione estesa)")
+
+cat("\n✔ Tutti e 3 i file PNG sono stati salvati nella working directory.\n")
+cat("  Usa getwd() per vedere il percorso.\n")
