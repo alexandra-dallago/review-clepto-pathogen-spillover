@@ -1,0 +1,497 @@
+# ============================================================
+#  TEMPORAL OVERLAP & TRANSMISSION RISK - LINES
+#  Patogen Prevalence/Abundance per Clepto vs Wild Bees
+#  Dataset: DS_C_-_Copia.xlsx  |  Sheet: Flight Period
+# ============================================================
+
+# install.packages(c("readxl","dplyr","tidyr","stringr","ggplot2","patchwork"))
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(patchwork)
+
+# ============================================================
+#  1. CARICAMENTO E PULIZIA
+# ============================================================
+
+df <- read_excel("DS_C.xlsx", sheet = "Flight Period")
+
+# Pulizia colonna Pathogen
+df <- df %>%
+  rename(Taxa = Taxon) %>%
+  mutate(
+    Pathogen    = str_trim(Pathogen),
+    Pathogen    = na_if(Pathogen, "0"),
+    Pathogen    = na_if(Pathogen, ""),
+
+    # Normalizza percentuale: "100,00%" → 100.0
+    Perc_clean  = str_replace_all(Percentuale, "[%\\s]", ""),
+    Perc_clean  = str_replace(Perc_clean, ",", "."),
+    Prevalence  = suppressWarnings(as.numeric(Perc_clean)),
+    Prevalence  = ifelse(Prevalence == 0 & is.na(Pathogen), NA, Prevalence),
+
+    # Data_type
+    Data_type   = case_when(
+      is.na(Pathogen)              ~ "no_pathogen",
+      !is.na(Prevalence)           ~ "quantitative",
+      TRUE                         ~ "presence_only"
+    ),
+
+    # Espandi Flight Period "Mar-Oct" nei mesi singoli
+    FP          = `Flight Period`,
+    month_start = str_extract(FP, "^[A-Za-z]+"),
+    month_end   = str_extract(FP, "[A-Za-z]+$")
+  )
+
+# Mappa mesi abbreviati → numero
+month_map <- c(Jan=1,Feb=2,Mar=3,Apr=4,May=5,Jun=6,
+               Jul=7,Aug=8,Sep=9,Oct=10,Nov=11,Dec=12)
+
+df <- df %>%
+  mutate(
+    m_start = month_map[str_to_title(month_start)],
+    m_end   = month_map[str_to_title(month_end)]
+  )
+
+# Espandi ogni riga nei singoli mesi del periodo di volo
+df_exp <- df %>%
+  filter(!is.na(m_start), !is.na(m_end)) %>%
+  rowwise() %>%
+  mutate(Month = list(m_start:m_end)) %>%
+  unnest(Month) %>%
+  ungroup()
+
+cat("✔ Dati espansi:", nrow(df_exp), "righe\n")
+cat("  Patogeni unici:", n_distinct(df_exp$Pathogen, na.rm=TRUE), "\n\n")
+
+# ============================================================
+#  2. CALCOLO METRICHE PER MESE × TAXA
+# ============================================================
+
+month_labels <- c("Jan","Feb","Mar","Apr","May","Jun",
+                  "Jul","Aug","Sep","Oct","Nov","Dec")
+
+# ── METRICA A: Media prevalenze quantitative ────────────────
+metrica_A <- df_exp %>%
+  filter(Data_type == "quantitative") %>%
+  group_by(Taxa, Month) %>%
+  summarise(value = mean(Prevalence, na.rm = TRUE), .groups = "drop") %>%
+  mutate(metrica = "A: Media Prevalenza Quantitativa (%)")
+
+# ── METRICA B: Prevalenza binaria (% specie con ≥1 patogeno) 
+metrica_B <- df_exp %>%
+  filter(Data_type != "no_pathogen") %>%
+  group_by(Taxa, Month, Species) %>%
+  summarise(has_pathogen = any(!is.na(Pathogen)), .groups = "drop") %>%
+  group_by(Taxa, Month) %>%
+  summarise(value = mean(has_pathogen) * 100, .groups = "drop") %>%
+  mutate(metrica = "B: Prevalenza Binaria (% specie con patogeno)")
+
+# ── METRICA C: Pathogen Richness (n° patogeni medi per specie)
+metrica_C <- df_exp %>%
+  filter(!is.na(Pathogen)) %>%
+  group_by(Taxa, Month, Species) %>%
+  summarise(n_path = n_distinct(Pathogen), .groups = "drop") %>%
+  group_by(Taxa, Month) %>%
+  summarise(value = mean(n_path), .groups = "drop") %>%
+  mutate(metrica = "C: Pathogen Richness (n° patogeni/specie)")
+
+# Unisci tutto
+all_metrics <- bind_rows(metrica_A, metrica_B, metrica_C) %>%
+  mutate(Month_label = factor(month_labels[Month], levels = month_labels))
+
+# ============================================================
+#  3. COLORI E TEMA
+# ============================================================
+
+col_clepto <- "#D62828"   # rosso
+col_wild   <- "#006494"   # blu
+col_overlap <- "#FFA500"  # arancio per l'area di overlap
+
+theme_overlap <- theme_minimal(base_size = 13) +
+  theme(
+    plot.title      = element_text(face = "bold", size = 13, hjust = 0.5),
+    plot.subtitle   = element_text(size = 9, hjust = 0.5, color = "grey40"),
+    axis.title      = element_text(size = 11),
+    legend.position = "bottom",
+    legend.title    = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text      = element_text(face = "bold", size = 11)
+  )
+
+# ============================================================
+#  4. FUNZIONE PLOT PER OGNI METRICA
+# ============================================================
+
+plot_metrica <- function(data, metrica_name, y_label, subtitle_txt) {
+
+  d <- data %>% filter(metrica == metrica_name)
+
+  # Calcola area di overlap (mesi in cui ENTRAMBI i taxa hanno dati)
+  overlap_months <- d %>%
+    group_by(Month_label) %>%
+    filter(n_distinct(Taxa) == 2) %>%
+    pull(Month_label) %>%
+    unique()
+
+  ggplot(d, aes(x = Month_label, y = value, color = Taxa, group = Taxa)) +
+
+    # Area di overlap
+    annotate("rect",
+             xmin = as.numeric(min(overlap_months)) - 0.5,
+             xmax = as.numeric(max(overlap_months)) + 0.5,
+             ymin = -Inf, ymax = Inf,
+             fill = col_overlap, alpha = 0.10) +
+    annotate("text",
+             x = median(as.numeric(overlap_months)),
+             y = max(d$value, na.rm=TRUE) * 0.95,
+             label = "Overlap window:\nincreased transmission risk",
+             size = 3, color = col_overlap, fontface = "italic") +
+
+    # Linee + punti
+    geom_line(linewidth = 1.2) +
+    geom_point(size = 3) +
+    geom_ribbon(aes(ymin = 0, ymax = value, fill = Taxa),
+                alpha = 0.15, color = NA) +
+
+    scale_color_manual(values = c("Cleptoparasite" = col_clepto,
+                                  "Wild bee"       = col_wild),
+                       labels = c("Cleptoparasite" = "Cleptoparasiti",
+                                  "Wild bee"       = "Wild Bees")) +
+    scale_fill_manual(values  = c("Cleptoparasite" = col_clepto,
+                                  "Wild bee"       = col_wild),
+                      labels  = c("Cleptoparasite" = "Cleptoparasiti",
+                                  "Wild bee"       = "Wild Bees")) +
+
+    scale_x_discrete(drop = FALSE) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+
+    labs(title    = metrica_name,
+         subtitle = subtitle_txt,
+         x        = "Mese",
+         y        = y_label) +
+
+    theme_overlap
+}
+
+# ============================================================
+#  5. GENERA I 3 GRAFICI
+# ============================================================
+
+p1 <- plot_metrica(all_metrics,
+  metrica_name = "A: Media Prevalenza Quantitativa (%)",
+  y_label      = "Prevalenza media (%)",
+  subtitle_txt = "Solo dati con percentuale numerica disponibile")
+
+p2 <- plot_metrica(all_metrics,
+  metrica_name = "B: Prevalenza Binaria (% specie con patogeno)",
+  y_label      = "% specie con ≥1 patogeno",
+  subtitle_txt = "Tutti i dati (quantitativi + presenza/assenza)")
+
+p3 <- plot_metrica(all_metrics,
+  metrica_name = "C: Pathogen Richness (n° patogeni/specie)",
+  y_label      = "N° medio patogeni per specie",
+  subtitle_txt = "Tutti i dati: diversità di patogeni per mese")
+
+# ============================================================
+#  6. SALVATAGGIO
+# ============================================================
+
+# Grafici singoli
+ggsave("temporal_overlap_A_prevalenza.png", p1,
+       width=12, height=6, dpi=300, bg="white")
+ggsave("temporal_overlap_B_binaria.png",    p2,
+       width=12, height=6, dpi=300, bg="white")
+ggsave("temporal_overlap_C_richness.png",   p3,
+       width=12, height=6, dpi=300, bg="white")
+
+# Pannello combinato con tutti e 3
+p_combined <- p1 / p2 / p3 +
+  plot_annotation(
+    title    = "Temporal Overlap & Pathogen Transmission Risk",
+    subtitle = "Cleptoparasiti vs Wild Bees — periodo di attività e patogeni rilevati",
+    theme    = theme(
+      plot.title    = element_text(face="bold", size=15, hjust=0.5),
+      plot.subtitle = element_text(size=10, hjust=0.5, color="grey40")
+    )
+  )
+
+ggsave("temporal_overlap_PANNELLO.png", p_combined,
+       width=14, height=16, dpi=300, bg="white")
+ggsave("temporal_overlap_PANNELLO.tiff", p_combined,
+       width=14, height=16, dpi=300, bg="white", compression="lzw")
+
+cat("✔ File salvati:\n")
+cat("  temporal_overlap_A_prevalenza.png\n")
+cat("  temporal_overlap_B_binaria.png\n")
+cat("  temporal_overlap_C_richness.png\n")
+cat("  temporal_overlap_PANNELLO.png\n")
+cat("  temporal_overlap_PANNELLO.tiff\n")
+cat("  Percorso:", getwd(), "\n")
+# ============================================================
+#  TEMPORAL OVERLAP & TRANSMISSION RISK - CAMPANE GAUSSIANE
+#  Metrica A: Prevalenza  |  Metrica C: Pathogen Richness
+#  Dataset: DS_C_-_Copia.xlsx  |  Sheet: Flight Period
+# ============================================================
+
+# install.packages(c("readxl","dplyr","tidyr","stringr","ggplot2","patchwork"))
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(patchwork)
+
+# ============================================================
+#  1. CARICAMENTO E PULIZIA
+# ============================================================
+
+df <- read_excel("DS_C.xlsx", sheet = "Flight Period")
+
+df <- df %>%
+  rename(Taxa = Taxon) %>%
+  mutate(
+    Pathogen   = str_trim(Pathogen),
+    Pathogen   = na_if(Pathogen, "0"),
+    Pathogen   = na_if(Pathogen, ""),
+    Perc_clean = str_replace_all(Percentuale, "[%\\s]", ""),
+    Perc_clean = str_replace(Perc_clean, ",", "."),
+    Prevalence = suppressWarnings(as.numeric(Perc_clean)),
+    Data_type  = case_when(
+      is.na(Pathogen)    ~ "no_pathogen",
+      !is.na(Prevalence) ~ "quantitative",
+      TRUE               ~ "presence_only"
+    ),
+    month_start = str_extract(`Flight Period`, "^[A-Za-z]+"),
+    month_end   = str_extract(`Flight Period`, "[A-Za-z]+$")
+  )
+
+month_map <- c(Jan=1,Feb=2,Mar=3,Apr=4,May=5,Jun=6,
+               Jul=7,Aug=8,Sep=9,Oct=10,Nov=11,Dec=12)
+
+df <- df %>%
+  mutate(
+    m_start = month_map[str_to_title(month_start)],
+    m_end   = month_map[str_to_title(month_end)]
+  )
+
+# Espandi nei singoli mesi
+df_exp <- df %>%
+  filter(!is.na(m_start), !is.na(m_end)) %>%
+  rowwise() %>%
+  mutate(Month = list(m_start:m_end)) %>%
+  unnest(Month) %>%
+  ungroup()
+
+cat("✔ Dati espansi:", nrow(df_exp), "righe\n\n")
+
+# ============================================================
+#  2. METRICHE A e C per mese × taxa
+# ============================================================
+
+month_labels <- c("Jan","Feb","Mar","Apr","May","Jun",
+                  "Jul","Aug","Sep","Oct","Nov","Dec")
+
+# Metrica A: media prevalenza quantitativa
+metrica_A <- df_exp %>%
+  filter(Data_type == "quantitative") %>%
+  group_by(Taxa, Month) %>%
+  summarise(value = mean(Prevalence, na.rm = TRUE), .groups = "drop")
+
+# Metrica C: pathogen richness
+metrica_C <- df_exp %>%
+  filter(!is.na(Pathogen)) %>%
+  group_by(Taxa, Month, Species) %>%
+  summarise(n_path = n_distinct(Pathogen), .groups = "drop") %>%
+  group_by(Taxa, Month) %>%
+  summarise(value = mean(n_path), .groups = "drop")
+
+# ============================================================
+#  3. FUNZIONE CAMPANA GAUSSIANA
+#     Fitta una gaussiana sui valori mese × taxa
+#     e restituisce una curva smooth su griglia fine
+# ============================================================
+
+fit_gaussian_curve <- function(data_taxa, taxa_name, n_points = 500) {
+
+  d <- data_taxa %>% filter(Taxa == taxa_name)
+  if (nrow(d) < 3) return(NULL)
+
+  # Usa i valori osservati come pesi per stimare mu e sigma
+  total  <- sum(d$value)
+  mu     <- sum(d$Month * d$value) / total
+  sigma  <- sqrt(sum(d$value * (d$Month - mu)^2) / total)
+  if (sigma < 0.3) sigma <- 0.3   # evita campane troppo strette
+  peak   <- max(d$value)
+
+  # Griglia fine per la curva
+  x_seq <- seq(1, 12, length.out = n_points)
+  y_seq <- peak * exp(-0.5 * ((x_seq - mu) / sigma)^2)
+
+  tibble(Month_cont = x_seq, value_fit = y_seq, Taxa = taxa_name)
+}
+
+# ============================================================
+#  4. FUNZIONE PLOT A CAMPANE
+# ============================================================
+
+col_clepto  <- "#D62828"
+col_wild    <- "#006494"
+col_overlap <- "#FFA500"
+
+plot_campane <- function(metrica_data, titolo, y_label, subtitle_txt) {
+
+  # Curve gaussiane per ciascun taxon
+  curve_c <- fit_gaussian_curve(metrica_data, "Cleptoparasite")
+  curve_w <- fit_gaussian_curve(metrica_data, "Wild bee")
+
+  if (is.null(curve_c) || is.null(curve_w)) {
+    message("Dati insufficienti per ", titolo)
+    return(NULL)
+  }
+
+  curves <- bind_rows(curve_c, curve_w)
+
+  # Area di overlap = intersezione tra le due campane
+  # Calcola il min delle due curve su griglia comune
+  x_seq   <- curve_c$Month_cont
+  y_c     <- curve_c$value_fit
+  y_w     <- approx(curve_w$Month_cont, curve_w$value_fit, xout = x_seq)$y
+  y_w[is.na(y_w)] <- 0
+  y_overlap <- pmin(y_c, y_w)
+
+  overlap_df <- tibble(Month_cont = x_seq, y_overlap = y_overlap)
+
+  # Ticks asse X
+  x_breaks <- 1:12
+  x_labels <- month_labels
+
+  ggplot() +
+
+    # Area overlap (arancione)
+    geom_ribbon(data = overlap_df,
+                aes(x = Month_cont, ymin = 0, ymax = y_overlap),
+                fill = col_overlap, alpha = 0.45) +
+
+    # Campane piene (semi-trasparenti)
+    geom_ribbon(data = curves %>% filter(Taxa == "Cleptoparasite"),
+                aes(x = Month_cont, ymin = 0, ymax = value_fit),
+                fill = col_clepto, alpha = 0.20) +
+    geom_ribbon(data = curves %>% filter(Taxa == "Wild bee"),
+                aes(x = Month_cont, ymin = 0, ymax = value_fit),
+                fill = col_wild, alpha = 0.20) +
+
+    # Contorni campane
+    geom_line(data = curves %>% filter(Taxa == "Cleptoparasite"),
+              aes(x = Month_cont, y = value_fit),
+              color = col_clepto, linewidth = 1.4) +
+    geom_line(data = curves %>% filter(Taxa == "Wild bee"),
+              aes(x = Month_cont, y = value_fit),
+              color = col_wild, linewidth = 1.4) +
+
+    # Punti osservati
+    geom_point(data = metrica_data %>% filter(Taxa == "Cleptoparasite"),
+               aes(x = Month, y = value),
+               color = col_clepto, size = 2.5, shape = 16) +
+    geom_point(data = metrica_data %>% filter(Taxa == "Wild bee"),
+               aes(x = Month, y = value),
+               color = col_wild, size = 2.5, shape = 16) +
+
+    # Etichetta overlap
+    annotate("text",
+             x     = x_seq[which.max(y_overlap)],
+             y     = max(y_overlap) * 1.08,
+             label = "Overlap window:\nincreased transmission risk",
+             size  = 3.2, color = darken(col_overlap, 0.3),
+             fontface = "italic", hjust = 0.5) +
+
+    # Etichette gruppi (come nell'immagine esempio)
+    annotate("text",
+             x     = curve_c$Month_cont[which.max(curve_c$value_fit)] - 1.5,
+             y     = max(curve_c$value_fit) * 0.85,
+             label = "Cleptoparasite\nactivity",
+             color = col_clepto, size = 3.5, fontface = "bold", hjust = 1) +
+    annotate("text",
+             x     = curve_w$Month_cont[which.max(curve_w$value_fit)] + 1.5,
+             y     = max(curve_w$value_fit) * 0.85,
+             label = "Wild Bee\nactivity",
+             color = col_wild, size = 3.5, fontface = "bold", hjust = 0) +
+
+    scale_x_continuous(breaks = x_breaks, labels = x_labels,
+                       limits = c(1, 12), expand = expansion(mult=0.02)) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+
+    labs(title    = titolo,
+         subtitle = subtitle_txt,
+         x        = NULL,
+         y        = y_label) +
+
+    theme_minimal(base_size = 13) +
+    theme(
+      plot.title      = element_text(face="bold", size=13, hjust=0.5),
+      plot.subtitle   = element_text(size=9, hjust=0.5, color="grey40"),
+      axis.title.y    = element_text(size=11),
+      axis.text.x     = element_text(size=11),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      legend.position = "none"
+    )
+}
+
+# Helper per scurire un colore (per il testo overlap)
+darken <- function(color, factor = 0.3) {
+  col <- col2rgb(color) / 255
+  col <- col * (1 - factor)
+  rgb(col[1], col[2], col[3])
+}
+
+# ============================================================
+#  5. GENERA I 2 GRAFICI
+# ============================================================
+
+p_A <- plot_campane(metrica_A,
+  titolo       = "Temporal Overlap: Pathogen Prevalence",
+  y_label      = "Mean Prevalence (%)",
+  subtitle_txt = "Gaussian fit on monthly mean quantitative prevalence")
+
+p_C <- plot_campane(metrica_C,
+  titolo       = "Temporal Overlap: Pathogen Richness",
+  y_label      = "Mean N° Pathogens per Species",
+  subtitle_txt = "Gaussian fit on monthly mean pathogen richness")
+
+# ============================================================
+#  6. SALVATAGGIO
+# ============================================================
+
+# Singoli
+ggsave("temporal_overlap_prevalenza.png", p_A,
+       width=12, height=6, dpi=300, bg="white")
+ggsave("temporal_overlap_richness.png",   p_C,
+       width=12, height=6, dpi=300, bg="white")
+
+# Pannello combinato
+p_panel <- p_A / p_C +
+  plot_annotation(
+    title    = "Temporal Overlap & Pathogen Transmission Risk",
+    subtitle = "Cleptoparasites vs Wild Bees",
+    theme    = theme(
+      plot.title    = element_text(face="bold", size=15, hjust=0.5),
+      plot.subtitle = element_text(size=10, hjust=0.5, color="grey40")
+    )
+  )
+
+ggsave("temporal_overlap_PANNELLO.png",  p_panel,
+       width=12, height=11, dpi=300, bg="white")
+ggsave("temporal_overlap_PANNELLO.tiff", p_panel,
+       width=12, height=11, dpi=300, bg="white", compression="lzw")
+
+cat("✔ File salvati:\n")
+cat("  temporal_overlap_prevalenza.png\n")
+cat("  temporal_overlap_richness.png\n")
+cat("  temporal_overlap_PANNELLO.png\n")
+cat("  temporal_overlap_PANNELLO.tiff\n")
+cat("  Percorso:", getwd(), "\n")
